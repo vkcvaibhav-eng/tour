@@ -1,83 +1,58 @@
 import streamlit as st
 import google.generativeai as genai
-from serpapi import GoogleSearch
-from fpdf import FPDF
+from docx import Document
+from docx.shared import Pt, Inches, Cm
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 import tempfile
 import os
 import json
 import pandas as pd
+from datetime import datetime
 
 # --- CONFIGURE PAGE ---
 st.set_page_config(page_title="NAU Tour Diary Generator", layout="wide")
 
-st.title("📝 Automated Tour Diary Generator (NAU)")
+st.title("📝 Automated Tour Diary Generator (Word Output)")
 st.markdown("""
-This tool processes **Online Tour Management System** PDFs and **Salary Slips** to generate a formatted Tour Diary.
-**Distance Logic:** Calculates Railway distance first. If no direct connection exists, it falls back to GSRTC/Road distance.
+**Generates a .docx Tour Diary matching the specific NAU format.**
+* **Upload:** Tour Orders, Tickets (Railway/Bus/Flight), and Salary Slip.
+* **Process:** Extracts dates, places, and distances automatically using Gemini AI.
+* **Output:** MS Word file with the required Headers, B.H. Code, and Signature blocks.
 """)
 
-# --- SIDEBAR: API KEYS ---
+# --- SIDEBAR: API KEY ---
 with st.sidebar:
     st.header("🔑 API Configuration")
     GEMINI_API_KEY = st.text_input("Gemini API Key", type="password")
-    SERPAPI_KEY = st.text_input("SerpApi Key", type="password")
-    
-    st.info("Get keys from Google AI Studio and SerpApi.")
+    st.info("Get your key from Google AI Studio.")
 
-# --- FUNCTIONS ---
+# --- HELPER FUNCTIONS ---
 
-def get_distance_serpapi(origin, destination, api_key):
+def set_cell_border(cell, **kwargs):
     """
-    Calculates distance. Prioritizes Railway. If not available, uses Road.
+    Helper to set cell borders in python-docx (which is tricky by default).
     """
-    # 1. Try Railway First
-    params_train = {
-        "engine": "google_maps",
-        "q": f"train from {origin} to {destination}",
-        "type": "search",
-        "api_key": api_key
-    }
+    tc = cell._tc
+    tcPr = tc.get_or_add_tcPr()
     
-    try:
-        search = GoogleSearch(params_train)
-        results = search.get_dict()
-        
-        # Check if transit options exist and look for a train line
-        if "directions" in results and results["directions"]:
-            # Simplified check: assumes if google gives transit direction, rail/bus is valid
-            # For stricter "Railway Only", we would parse the transit_details
-            dist_text = results["directions"][0]["distance"]
-            km = float(dist_text.replace(" km", "").replace(",", ""))
-            return km, "Railway (Calculated)"
+    for edge in ('top', 'left', 'bottom', 'right', 'insideH', 'insideV'):
+        edge_data = kwargs.get(edge)
+        if edge_data:
+            tag = 'w:{}'.format(edge)
+            element = tcPr.find(qn(tag))
+            if element is None:
+                element = OxmlElement(tag)
+                tcPr.append(element)
             
-    except Exception as e:
-        print(f"Railway search failed: {e}")
+            for key in ["val", "sz", "space", "color"]:
+                if key in edge_data:
+                    element.set(qn('w:{}'.format(key)), str(edge_data[key]))
 
-    # 2. Fallback to Road (GSRTC logic)
-    params_road = {
-        "engine": "google_maps",
-        "q": f"driving distance from {origin} to {destination}",
-        "type": "search",
-        "api_key": api_key
-    }
-    
-    try:
-        search = GoogleSearch(params_road)
-        results = search.get_dict()
-        
-        if "directions" in results and results["directions"]:
-            dist_text = results["directions"][0]["distance"]
-            km = float(dist_text.replace(" km", "").replace(",", ""))
-            return km, "Road (GSRTC/Fallback)"
-            
-    except Exception as e:
-        return 0, "Error"
-    
-    return 0, "Not Found"
-
-def extract_pdf_data(uploaded_file, api_key):
+def extract_doc_data(uploaded_file, api_key):
     """
-    Uses Gemini 1.5 Pro to extract relevant fields from the uploaded PDF.
+    Uses Gemini to extract data from Tour Orders, Tickets, or Salary Slips.
     """
     genai.configure(api_key=api_key)
     
@@ -87,33 +62,40 @@ def extract_pdf_data(uploaded_file, api_key):
         tmp_path = tmp.name
 
     try:
-        sample_file = genai.upload_file(path=tmp_path, display_name="TourDoc")
+        sample_file = genai.upload_file(path=tmp_path, display_name="NAU_Doc")
         
-        model = genai.GenerativeModel('gemini-3-flash-preview')
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
         prompt = """
-        Analyze this document. It is either a 'Tour Approval' or a 'Salary Slip'.
+        Analyze this document. It is either a 'Tour Approval', a 'Ticket/Fare Enquiry', or a 'Salary Slip'.
         
-        If it is a **Tour Approval**, extract the following into a JSON object:
-        - type: "tour"
-        - departure_date: (Format DD/MM/YYYY)
-        - departure_place: (City name only)
-        - arrival_date: (Format DD/MM/YYYY)
-        - arrival_place: (City name only)
-        - purpose: (The full text under 'Purpose of Journey')
-        - mode_of_journey: (e.g., Private Vehicle, Govt Vehicle)
+        1. If **Salary Slip**: Extract 'type': 'salary', 'name', 'designation', 'basic_pay'.
         
-        If it is a **Salary Slip**, extract:
-        - type: "salary"
-        - name: (Employee Name)
-        - designation: (Designation)
-        - basic_pay: (Basic Pay Amount)
+        2. If **Tour Approval** OR **Ticket**: Extract 'type': 'tour'.
+           Create a list of trips found. For each trip extract:
+           - departure_date (DD/MM/YYYY)
+           - departure_time (HH:MM format, 24hr)
+           - departure_place (City/Campus name)
+           - arrival_date (DD/MM/YYYY)
+           - arrival_time (HH:MM format, 24hr)
+           - arrival_place (City/Campus name)
+           - mode_of_journey (e.g., Govt Vehicle, Private Vehicle, Train, Bus)
+           - distance_km (Numeric only. Look for 'KM', 'Distance', or infer from ticket details. If not found, put 0).
+           - purpose (The specific purpose of the journey mentioned).
         
-        Return ONLY valid JSON. No markdown formatting.
+        Return ONLY valid JSON. Structure:
+        {
+          "type": "salary" or "tour",
+          ... fields ...
+        }
         """
         
         response = model.generate_content([sample_file, prompt])
-        return json.loads(response.text.strip().replace('```json', '').replace('```', ''))
+        # Clean response
+        text = response.text.strip()
+        if text.startswith('```json'):
+            text = text.replace('```json', '').replace('```', '')
+        return json.loads(text)
         
     except Exception as e:
         st.error(f"Error processing {uploaded_file.name}: {str(e)}")
@@ -121,123 +103,197 @@ def extract_pdf_data(uploaded_file, api_key):
     finally:
         os.remove(tmp_path)
 
-def generate_tour_pdf(tour_data, user_details):
-    """
-    Generates the A4 PDF formatted like the 'Tour Diary' example.
-    """
-    pdf = FPDF(orientation='L', unit='mm', format='A4') # Landscape to fit table
-    pdf.add_page()
-    pdf.set_font("Arial", 'B', 14)
+def generate_word_doc(tour_data, user_details):
+    doc = Document()
     
-    # Header
-    pdf.cell(0, 10, "TOUR DIARY", ln=True, align='C')
-    pdf.set_font("Arial", '', 11)
-    
-    # User Details Section
-    if user_details:
-        pdf.cell(0, 8, f"Name: {user_details.get('name', '')}", ln=True)
-        pdf.cell(0, 8, f"Designation: {user_details.get('designation', '')}", ln=True)
-        pdf.cell(0, 8, f"Basic Salary: {user_details.get('basic_pay', '')}", ln=True)
-    pdf.ln(5)
-    
-    # Table Header
-    pdf.set_font("Arial", 'B', 10)
-    pdf.set_fill_color(200, 220, 255)
-    
-    # Columns: Dep Date, Dep Time, Arr Date, Arr Time, Mode, KM, Purpose
-    # Widths sum to roughly 270mm (A4 Landscape)
-    col_w = [25, 20, 25, 20, 30, 20, 130]
-    headers = ["Dep. Date", "Place", "Arr. Date", "Place", "Mode", "KM", "Purpose"]
-    
-    for i, h in enumerate(headers):
-        pdf.cell(col_w[i], 10, h, border=1, fill=True, align='C')
-    pdf.ln()
-    
-    # Table Rows
-    pdf.set_font("Arial", '', 9)
-    for trip in tour_data:
-        # Multi-cell for purpose is tricky in basic FPDF, truncating for simplicity
-        # or using basic cells.
-        
-        # Row 1: Departure
-        pdf.cell(col_w[0], 10, trip['departure_date'], border=1)
-        pdf.cell(col_w[1], 10, trip['departure_place'], border=1)
-        pdf.cell(col_w[2], 10, trip['arrival_date'], border=1)
-        pdf.cell(col_w[3], 10, trip['arrival_place'], border=1)
-        pdf.cell(col_w[4], 10, trip['mode_of_journey'], border=1)
-        pdf.cell(col_w[5], 10, str(trip['distance_km']), border=1)
-        
-        # Purpose (Truncate to fit single line for basic FPDF)
-        purpose_short = (trip['purpose'][:80] + '..') if len(trip['purpose']) > 80 else trip['purpose']
-        pdf.cell(col_w[6], 10, purpose_short, border=1)
-        pdf.ln()
+    # --- STYLES ---
+    style = doc.styles['Normal']
+    font = style.font
+    font.name = 'Times New Roman'
+    font.size = Pt(12)
 
-    return pdf
+    # --- HEADER ---
+    # Title
+    p_title = doc.add_paragraph()
+    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run_title = p_title.add_run("TOUR DIARY")
+    run_title.bold = True
+    run_title.font.size = Pt(14)
+    run_title.font.underline = True
+
+    # User Info Block
+    # Determine Month Range
+    dates = [t['departure_date'] for t in tour_data if t.get('departure_date')]
+    month_str = "Month: [Date Range]"
+    if dates:
+        try:
+            # Simple logic to find start and end month
+            date_objs = [datetime.strptime(d, "%d/%m/%Y") for d in dates]
+            min_date = min(date_objs)
+            max_date = max(date_objs)
+            month_str = f"Month: {min_date.strftime('%B-%Y')} to {max_date.strftime('%B-%Y')}"
+        except:
+            pass
+
+    # Header Text Block
+    header_text = (
+        f"Designation: {user_details.get('designation', 'Associate Professor')}\n"
+        f"Name: {user_details.get('name', 'Vaibhav Kumar Kanubhai Chaudhari')}\n"
+        f"Basic salary: {user_details.get('basic_pay', 'N/A')}\n"
+        f"B.H: 303/2092\n"
+        f"Dept. of Entomology, N. M. Collage of Agriculture, NAU, Navsari - 396 450\n"
+        f"{month_str}"
+    )
+    
+    p_header = doc.add_paragraph(header_text)
+    p_header_fmt = p_header.paragraph_format
+    p_header_fmt.space_after = Pt(12)
+
+    # --- TABLE ---
+    # 7 Columns: Dep Place, Dep Date, Dep Time, Arr Place, Arr Date, Arr Time, Mode, KM, Purpose
+    # Actually, let's match the visual reference:
+    # Dep (Date, Time, Place) | Arr (Date, Time, Place) | Mode | KM | Purpose
+    
+    table = doc.add_table(rows=1, cols=9)
+    table.style = 'Table Grid'
+    table.autofit = False 
+    
+    # Set Column Headers
+    hdr_cells = table.rows[0].cells
+    headers = ["Dep. Place", "Date", "Time", "Arr. Place", "Date", "Time", "Mode", "KM", "Purpose"]
+    
+    for i, text in enumerate(headers):
+        hdr_cells[i].text = text
+        run = hdr_cells[i].paragraphs[0].runs[0]
+        run.bold = True
+        run.font.size = Pt(10)
+
+    # Fill Data
+    for trip in tour_data:
+        row_cells = table.add_row().cells
+        
+        # Mapping data to columns
+        row_cells[0].text = str(trip.get('departure_place', ''))
+        row_cells[1].text = str(trip.get('departure_date', ''))
+        row_cells[2].text = str(trip.get('departure_time', ''))
+        
+        row_cells[3].text = str(trip.get('arrival_place', ''))
+        row_cells[4].text = str(trip.get('arrival_date', ''))
+        row_cells[5].text = str(trip.get('arrival_time', ''))
+        
+        row_cells[6].text = str(trip.get('mode_of_journey', ''))
+        row_cells[7].text = str(trip.get('distance_km', ''))
+        row_cells[8].text = str(trip.get('purpose', ''))
+        
+        # Set font size for row
+        for cell in row_cells:
+            for paragraph in cell.paragraphs:
+                for run in paragraph.runs:
+                    run.font.size = Pt(9)
+
+    doc.add_paragraph().paragraph_format.space_after = Pt(24)
+
+    # --- SIGNATURE BLOCK ---
+    # We use a table with invisible borders to arrange the signatures
+    
+    # Row 1: User Signature (Right Aligned usually, or as per letter pdf)
+    # The letter pdf shows User sign, then Recommended, then Approved.
+    
+    sig_table = doc.add_table(rows=1, cols=2)
+    sig_table.autofit = True
+    
+    # Left cell empty, Right cell has User Sign
+    cell_user = sig_table.rows[0].cells[1]
+    p_user = cell_user.add_paragraph()
+    p_user.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run_u = p_user.add_run("(V. K. Chaudhari)\nSenior Acarologist\nDepartment of Entomology\nN.M. College of Agriculture\nNAU, Navsari")
+    run_u.bold = True
+    
+    doc.add_paragraph().paragraph_format.space_after = Pt(36)
+
+    # Row 2: Recommended (Left) and Approved (Right)
+    approval_table = doc.add_table(rows=1, cols=2)
+    approval_table.autofit = True
+    
+    # Recommended
+    cell_rec = approval_table.rows[0].cells[0]
+    p_rec = cell_rec.add_paragraph()
+    p_rec.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    run_r = p_rec.add_run("Recommended\n\n\nProfessor and Head\nDept. of Entomology\nN. M. College of Agriculture\nNAU, Navsari")
+    run_r.bold = True
+    
+    # Approved
+    cell_app = approval_table.rows[0].cells[1]
+    p_app = cell_app.add_paragraph()
+    p_app.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    run_a = p_app.add_run("Approved\n\n\nPrincipal and Dean\nN. M. College of Agriculture\nNAU, Navsari")
+    run_a.bold = True
+
+    return doc
 
 # --- MAIN APP LOGIC ---
 
-uploaded_files = st.file_uploader("Upload Tour PDFs and Salary Slip", 
+uploaded_files = st.file_uploader("Upload Documents (PDF)", 
                                   type=['pdf'], 
-                                  accept_multiple_files=True)
+                                  accept_multiple_files=True,
+                                  help="Upload Tour Approvals, Tickets/Fare Enquiries, and Salary Slip.")
 
-if uploaded_files and st.button("Generate Diary"):
-    if not GEMINI_API_KEY or not SERPAPI_KEY:
-        st.error("Please enter both API keys in the sidebar.")
+if uploaded_files and st.button("Generate Word Diary"):
+    if not GEMINI_API_KEY:
+        st.error("Please enter your Gemini API key.")
     else:
-        with st.spinner("Analyzing documents and calculating distances..."):
+        with st.spinner("Analyzing documents..."):
             
-            tour_entries = []
+            all_trips = []
             user_info = {}
             
             for file in uploaded_files:
-                data = extract_pdf_data(file, GEMINI_API_KEY)
+                data = extract_doc_data(file, GEMINI_API_KEY)
                 
                 if data:
                     if data.get('type') == 'salary':
-                        user_info = data
+                        # Update user info if salary slip found
+                        user_info.update(data)
                     elif data.get('type') == 'tour':
-                        # Calculate Distance Logic
-                        origin = data.get('departure_place')
-                        dest = data.get('arrival_place')
-                        mode = data.get('mode_of_journey', '').lower()
+                        # It might be a list of trips or a single object
+                        # The prompt asks for a list, but let's handle both
+                        if 'trips' in data and isinstance(data['trips'], list):
+                             all_trips.extend(data['trips'])
+                        elif 'departure_place' in data:
+                             all_trips.append(data)
                         
-                        km = 0
-                        calc_note = ""
-                        
-                        # Only calculate if Private Vehicle or explicit request
-                        if "private" in mode:
-                            km, calc_note = get_distance_serpapi(origin, dest, SERPAPI_KEY)
-                        
-                        data['distance_km'] = km
-                        data['calc_note'] = calc_note
-                        tour_entries.append(data)
+                        # Sometimes Gemini returns the list directly
+                        if isinstance(data, list):
+                            all_trips.extend(data)
 
-            # Sort by date
-            # (Requires consistent date format from Gemini, handled loosely here)
-            
-            if tour_entries:
-                st.success(f"Processed {len(tour_entries)} tours.")
+            if all_trips:
+                # Sort trips by date (simple string sort, preferably convert to date obj)
+                try:
+                    all_trips.sort(key=lambda x: datetime.strptime(x['departure_date'], "%d/%m/%Y") if x.get('departure_date') else datetime.min)
+                except:
+                    pass # Keep order if date parsing fails
+
+                # Preview
+                st.success(f"Found {len(all_trips)} trip entries.")
+                df = pd.DataFrame(all_trips)
+                if not df.empty:
+                    st.dataframe(df[['departure_date', 'departure_place', 'arrival_place', 'distance_km', 'purpose']])
+
+                # Generate DOCX
+                doc = generate_word_doc(all_trips, user_info)
                 
-                # Preview Data
-                df = pd.DataFrame(tour_entries)
-                st.dataframe(df[['departure_date', 'departure_place', 'arrival_place', 'distance_km', 'calc_note']])
+                # Save to buffer
+                bio = io.BytesIO() if 'io' in locals() else None
+                import io
+                bio = io.BytesIO()
+                doc.save(bio)
                 
-                # Generate PDF
-                pdf = generate_tour_pdf(tour_entries, user_info)
+                st.download_button(
+                    label="Download Tour Diary (.docx)",
+                    data=bio.getvalue(),
+                    file_name="NAU_Tour_Diary.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
                 
-                # Save and Download
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
-                    pdf.output(tmp_pdf.name)
-                    
-                    with open(tmp_pdf.name, "rb") as f:
-                        st.download_button(
-                            label="Download Tour Diary (PDF)",
-                            data=f,
-                            file_name="Tour_Diary_Generated.pdf",
-                            mime="application/pdf"
-                        )
             else:
-                st.warning("No tour data found in uploaded files.")
-
-
-
+                st.warning("No tour data extracted. Please check the uploaded files.")
