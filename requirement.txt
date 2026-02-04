@@ -1,5 +1,6 @@
 streamlit
-pandas
-openpyxl
+google-generativeai
+google-search-results
+fpdf
 pypdf
-python-dateutil
+python-dotenv
