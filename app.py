@@ -3,6 +3,7 @@ import google.generativeai as genai
 from docx import Document
 from docx.shared import Pt, Inches, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.section import WD_ORIENT, WD_SECTION
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 import tempfile
@@ -10,16 +11,17 @@ import os
 import json
 import pandas as pd
 from datetime import datetime
+import io
 
 # --- CONFIGURE PAGE ---
 st.set_page_config(page_title="NAU Tour Diary Generator", layout="wide")
 
-st.title("📝 Automated Tour Diary Generator (Word Output)")
+st.title("📝 Automated Tour Diary Generator (Landscape)")
 st.markdown("""
-**Generates a .docx Tour Diary matching the specific NAU format.**
-* **Upload:** Tour Orders, Tickets (Railway/Bus/Flight), and Salary Slip.
-* **Process:** Extracts dates, places, and distances automatically using Gemini AI.
-* **Output:** MS Word file with the required Headers, B.H. Code, and Signature blocks.
+**Generates a NAU Tour Diary in Landscape format matching the official Letter style.**
+* **Upload:** Tour Orders (contains System No.), Google Maps Screenshots (for Distance), and Tickets.
+* **Smart Merge:** Automatically extracts distance from Map screenshots and System IDs from Tour Orders.
+* **Output:** Formatted .docx with required Header, B.H., and Signature blocks.
 """)
 
 # --- SIDEBAR: API KEY ---
@@ -30,33 +32,25 @@ with st.sidebar:
 
 # --- HELPER FUNCTIONS ---
 
-def set_cell_border(cell, **kwargs):
-    """
-    Helper to set cell borders in python-docx (which is tricky by default).
-    """
-    tc = cell._tc
-    tcPr = tc.get_or_add_tcPr()
-    
-    for edge in ('top', 'left', 'bottom', 'right', 'insideH', 'insideV'):
-        edge_data = kwargs.get(edge)
-        if edge_data:
-            tag = 'w:{}'.format(edge)
-            element = tcPr.find(qn(tag))
-            if element is None:
-                element = OxmlElement(tag)
-                tcPr.append(element)
-            
-            for key in ["val", "sz", "space", "color"]:
-                if key in edge_data:
-                    element.set(qn('w:{}'.format(key)), str(edge_data[key]))
+def set_landscape(doc):
+    """Sets the document section to landscape orientation."""
+    section = doc.sections[0]
+    new_width, new_height = section.page_height, section.page_width
+    section.orientation = WD_ORIENT.LANDSCAPE
+    section.page_width = new_width
+    section.page_height = new_height
+    # Adjust margins for landscape
+    section.left_margin = Inches(0.5)
+    section.right_margin = Inches(0.5)
+    section.top_margin = Inches(0.5)
+    section.bottom_margin = Inches(0.5)
 
 def extract_doc_data(uploaded_file, api_key):
     """
-    Uses Gemini to extract data from Tour Orders, Tickets, or Salary Slips.
+    Uses Gemini to extract data from Tour Orders, Tickets, Salary Slips, or Map Screenshots.
     """
     genai.configure(api_key=api_key)
     
-    # Upload file to Gemini
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(uploaded_file.getvalue())
         tmp_path = tmp.name
@@ -64,34 +58,39 @@ def extract_doc_data(uploaded_file, api_key):
     try:
         sample_file = genai.upload_file(path=tmp_path, display_name="NAU_Doc")
         
-        model = genai.GenerativeModel('gemini-3-flash-preview')
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
         prompt = """
-        Analyze this document. It is either a 'Tour Approval', a 'Ticket/Fare Enquiry', or a 'Salary Slip'.
+        Analyze this document. Identify if it is a 'Tour Approval', 'Salary Slip', or 'Map Screenshot'.
         
-        1. If **Salary Slip**: Extract 'type': 'salary', 'name', 'designation', 'basic_pay'.
+        1. If **Tour Approval** (looks like "Online Tour Management System"):
+           - Extract 'type': 'tour_approval'.
+           - Extract 'system_no': The long number usually below a barcode or labeled "Tour ID/System No" (e.g., 21781756377236).
+           - Extract 'user_details': { 'name', 'designation', 'budget_head' (B.H.) } if visible.
+           - Extract 'trips': A list of journeys. For each:
+             - departure_date (DD/MM/YYYY)
+             - departure_time (HH:MM)
+             - departure_place (City/Campus)
+             - arrival_date (DD/MM/YYYY)
+             - arrival_time (HH:MM)
+             - arrival_place
+             - mode_of_journey
+             - purpose (Extract the specific reason/course name).
         
-        2. If **Tour Approval** OR **Ticket**: Extract 'type': 'tour'.
-           Create a list of trips found. For each trip extract:
-           - departure_date (DD/MM/YYYY)
-           - departure_time (HH:MM format, 24hr)
-           - departure_place (City/Campus name)
-           - arrival_date (DD/MM/YYYY)
-           - arrival_time (HH:MM format, 24hr)
-           - arrival_place (City/Campus name)
-           - mode_of_journey (e.g., Govt Vehicle, Private Vehicle, Train, Bus)
-           - distance_km (Numeric only. Look for 'KM', 'Distance', or infer from ticket details. If not found, put 0).
-           - purpose (The specific purpose of the journey mentioned).
+        2. If **Map Screenshot** (Google Maps):
+           - Extract 'type': 'map_data'.
+           - Extract 'distance_km': Numeric value of total distance (e.g., 142).
+           - Extract 'travel_time': Time string (e.g., "3 hr 15 min").
+           - Extract 'locations': Start and End points if visible.
         
-        Return ONLY valid JSON. Structure:
-        {
-          "type": "salary" or "tour",
-          ... fields ...
-        }
+        3. If **Salary Slip**:
+           - Extract 'type': 'salary'.
+           - Extract 'basic_pay'.
+        
+        Return ONLY valid JSON.
         """
         
         response = model.generate_content([sample_file, prompt])
-        # Clean response
         text = response.text.strip()
         if text.startswith('```json'):
             text = text.replace('```json', '').replace('```', '')
@@ -105,12 +104,13 @@ def extract_doc_data(uploaded_file, api_key):
 
 def generate_word_doc(tour_data, user_details):
     doc = Document()
+    set_landscape(doc)
     
     # --- STYLES ---
     style = doc.styles['Normal']
     font = style.font
     font.name = 'Times New Roman'
-    font.size = Pt(12)
+    font.size = Pt(11)
 
     # --- HEADER ---
     # Title
@@ -121,49 +121,69 @@ def generate_word_doc(tour_data, user_details):
     run_title.font.size = Pt(14)
     run_title.font.underline = True
 
-    # User Info Block
+    # User Info Block (Matching Letter PDF format)
     # Determine Month Range
     dates = [t['departure_date'] for t in tour_data if t.get('departure_date')]
-    month_str = "Month: [Date Range]"
+    month_str = ""
     if dates:
         try:
-            # Simple logic to find start and end month
             date_objs = [datetime.strptime(d, "%d/%m/%Y") for d in dates]
             min_date = min(date_objs)
             max_date = max(date_objs)
-            month_str = f"Month: {min_date.strftime('%B-%Y')} to {max_date.strftime('%B-%Y')}"
+            # If same month
+            if min_date.month == max_date.month and min_date.year == max_date.year:
+                month_str = f"Month: {min_date.strftime('%B-%Y')}"
+            else:
+                month_str = f"Month: {min_date.strftime('%B-%Y')} to {max_date.strftime('%B-%Y')}"
         except:
             pass
 
-    # Header Text Block
     header_text = (
         f"Designation: {user_details.get('designation', 'Associate Professor')}\n"
         f"Name: {user_details.get('name', 'Vaibhav Kumar Kanubhai Chaudhari')}\n"
         f"Basic salary: {user_details.get('basic_pay', 'N/A')}\n"
-        f"B.H: 303/2092\n"
+        f"B.H: {user_details.get('budget_head', '303/2092')}\n"
         f"Dept. of Entomology, N. M. Collage of Agriculture, NAU, Navsari - 396 450\n"
         f"{month_str}"
     )
     
     p_header = doc.add_paragraph(header_text)
-    p_header_fmt = p_header.paragraph_format
-    p_header_fmt.space_after = Pt(12)
+    p_header.paragraph_format.line_spacing = 1.15
+    p_header.paragraph_format.space_after = Pt(12)
 
     # --- TABLE ---
-    # 7 Columns: Dep Place, Dep Date, Dep Time, Arr Place, Arr Date, Arr Time, Mode, KM, Purpose
-    # Actually, let's match the visual reference:
-    # Dep (Date, Time, Place) | Arr (Date, Time, Place) | Mode | KM | Purpose
-    
-    table = doc.add_table(rows=1, cols=9)
+    # Columns: Dep (Place, Date, Time), Arr (Place, Date, Time), Mode, KM, Purpose
+    table = doc.add_table(rows=2, cols=9)
     table.style = 'Table Grid'
-    table.autofit = False 
     
-    # Set Column Headers
-    hdr_cells = table.rows[0].cells
-    headers = ["Dep. Place", "Date", "Time", "Arr. Place", "Date", "Time", "Mode", "KM", "Purpose"]
+    # Header Rows
+    # Row 1: Merged Headers for Dep/Arr could be done, but let's stick to the simpler structure from the prompt's source 21
+    # Actually source 21 splits Dep into Place/Date/Time.
     
-    for i, text in enumerate(headers):
-        hdr_cells[i].text = text
+    headers = [
+        "Departure\nPlace", "Date", "Time", 
+        "Arrival\nPlace", "Date", "Time", 
+        "Mode of\nJourney", "KM", "Purpose of Journey"
+    ]
+    
+    hdr_cells = table.rows[1].cells
+    # Row 0 title placeholders if we wanted merged cells, but let's just use Row 1 for keys
+    # Merging "Departure" and "Arrival" labels across 3 cols is cleaner:
+    
+    # Row 0
+    row0 = table.rows[0].cells
+    row0[0].merge(row0[2]) # Merge first 3 for Departure
+    row0[0].text = "Departure"
+    row0[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    row0[3].merge(row0[5]) # Merge next 3 for Arrival
+    row0[3].text = "Arrival"
+    row0[3].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    # Row 1
+    sub_headers = ["Place", "Date", "Time", "Place", "Date", "Time", "Mode", "KM", "Purpose"]
+    for i, txt in enumerate(sub_headers):
+        hdr_cells[i].text = txt
         run = hdr_cells[i].paragraphs[0].runs[0]
         run.bold = True
         run.font.size = Pt(10)
@@ -172,48 +192,68 @@ def generate_word_doc(tour_data, user_details):
     for trip in tour_data:
         row_cells = table.add_row().cells
         
-        # Mapping data to columns
-        row_cells[0].text = str(trip.get('departure_place', ''))
+        # 1. Dep Place
+        row_cells[0].text = str(trip.get('departure_place', 'NAU, Navsari'))
+        # 2. Dep Date
         row_cells[1].text = str(trip.get('departure_date', ''))
+        # 3. Dep Time
         row_cells[2].text = str(trip.get('departure_time', ''))
         
+        # 4. Arr Place
         row_cells[3].text = str(trip.get('arrival_place', ''))
+        # 5. Arr Date
         row_cells[4].text = str(trip.get('arrival_date', ''))
+        # 6. Arr Time
         row_cells[5].text = str(trip.get('arrival_time', ''))
         
-        row_cells[6].text = str(trip.get('mode_of_journey', ''))
-        row_cells[7].text = str(trip.get('distance_km', ''))
-        row_cells[8].text = str(trip.get('purpose', ''))
+        # 7. Mode
+        row_cells[6].text = str(trip.get('mode_of_journey', 'Private Vehicle'))
         
-        # Set font size for row
+        # 8. KM (From Map or Extraction)
+        row_cells[7].text = str(trip.get('distance_km', ''))
+        
+        # 9. Purpose
+        # Specific Format: "Tour is final Approved... System No. X"
+        sys_no = trip.get('system_no', '')
+        purpose_desc = trip.get('purpose', '')
+        purpose_text = (
+            f"Tour is final Approved by the Principal, NMCA, NAU.\n"
+            f"{purpose_desc}\n"
+            f"in Online Tour management System No.\n{sys_no}"
+        )
+        row_cells[8].text = purpose_text
+        
+        # Formatting
         for cell in row_cells:
-            for paragraph in cell.paragraphs:
-                for run in paragraph.runs:
-                    run.font.size = Pt(9)
+            for p in cell.paragraphs:
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER if cell != row_cells[8] else WD_ALIGN_PARAGRAPH.LEFT
+                for r in p.runs:
+                    r.font.size = Pt(10)
 
     doc.add_paragraph().paragraph_format.space_after = Pt(24)
 
-    # --- SIGNATURE BLOCK ---
-    # We use a table with invisible borders to arrange the signatures
-    
-    # Row 1: User Signature (Right Aligned usually, or as per letter pdf)
-    # The letter pdf shows User sign, then Recommended, then Approved.
-    
-    sig_table = doc.add_table(rows=1, cols=2)
+    # --- SIGNATURE BLOCK (As per Letter PDF) ---
+    sig_table = doc.add_table(rows=1, cols=3)
     sig_table.autofit = True
     
-    # Left cell empty, Right cell has User Sign
-    cell_user = sig_table.rows[0].cells[1]
-    p_user = cell_user.add_paragraph()
-    p_user.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run_u = p_user.add_run("(V. K. Chaudhari)\nSenior Acarologist\nDepartment of Entomology\nN.M. College of Agriculture\nNAU, Navsari")
+    # Cell 1: Empty or for submitting officer
+    # Cell 2: Recommended
+    # Cell 3: Approved
+    
+    # Usually: User (Right/Center), then Recommended (Left), Approved (Right) in next row.
+    # Let's follow Source 22-30 structure:
+    # 1. User Sign
+    
+    p_user_sign = doc.add_paragraph()
+    p_user_sign.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    run_u = p_user_sign.add_run(f"({user_details.get('name', 'Vaibhav Kumar Kanubhai Chaudhari')})\n{user_details.get('designation', 'Associate Professor')}\nDept. of Entomology\nN.M. College of Agriculture\nNAU, Navsari")
     run_u.bold = True
     
-    doc.add_paragraph().paragraph_format.space_after = Pt(36)
+    doc.add_paragraph() # Spacer
 
-    # Row 2: Recommended (Left) and Approved (Right)
+    # 2. Rec / App Table
     approval_table = doc.add_table(rows=1, cols=2)
-    approval_table.autofit = True
+    approval_table.width = Inches(9) # Span full width
     
     # Recommended
     cell_rec = approval_table.rows[0].cells[0]
@@ -236,65 +276,82 @@ def generate_word_doc(tour_data, user_details):
 uploaded_files = st.file_uploader("Upload Documents (PDF)", 
                                   type=['pdf'], 
                                   accept_multiple_files=True,
-                                  help="Upload Tour Approvals, Tickets/Fare Enquiries, and Salary Slip.")
+                                  help="Upload Tour Approvals (for dates/purpose), Map Screenshots (for distance), and Salary Slip (optional).")
 
 if uploaded_files and st.button("Generate Word Diary"):
     if not GEMINI_API_KEY:
         st.error("Please enter your Gemini API key.")
     else:
-        with st.spinner("Analyzing documents..."):
+        with st.spinner("Analyzing documents & Smart Merging..."):
             
-            all_trips = []
+            tour_entries = []
+            map_entries = []
             user_info = {}
             
+            # 1. Extract Data
             for file in uploaded_files:
                 data = extract_doc_data(file, GEMINI_API_KEY)
-                
                 if data:
-                    if data.get('type') == 'salary':
-                        # Update user info if salary slip found
-                        user_info.update(data)
-                    elif data.get('type') == 'tour':
-                        # It might be a list of trips or a single object
-                        # The prompt asks for a list, but let's handle both
-                        if 'trips' in data and isinstance(data['trips'], list):
-                             all_trips.extend(data['trips'])
-                        elif 'departure_place' in data:
-                             all_trips.append(data)
+                    dtype = data.get('type')
+                    if dtype == 'salary':
+                        user_info['basic_pay'] = data.get('basic_pay')
+                    
+                    elif dtype == 'tour_approval':
+                        # Capture user details from Tour Approval if not already set
+                        if 'user_details' in data:
+                            u = data['user_details']
+                            if u.get('name'): user_info['name'] = u['name']
+                            if u.get('designation'): user_info['designation'] = u['designation']
+                            if u.get('budget_head'): user_info['budget_head'] = u['budget_head']
                         
-                        # Sometimes Gemini returns the list directly
-                        if isinstance(data, list):
-                            all_trips.extend(data)
+                        # Add trips
+                        trips = data.get('trips', [])
+                        if isinstance(trips, list):
+                            for t in trips:
+                                t['system_no'] = data.get('system_no', 'Unknown')
+                                tour_entries.append(t)
+                        elif isinstance(trips, dict): # Single trip
+                             trips['system_no'] = data.get('system_no', 'Unknown')
+                             tour_entries.append(trips)
+                             
+                    elif dtype == 'map_data':
+                        map_entries.append(data)
 
-            if all_trips:
-                # Sort trips by date (simple string sort, preferably convert to date obj)
-                try:
-                    all_trips.sort(key=lambda x: datetime.strptime(x['departure_date'], "%d/%m/%Y") if x.get('departure_date') else datetime.min)
-                except:
-                    pass # Keep order if date parsing fails
+            # 2. Smart Merge (Map Data into Tour Data)
+            # Strategy: If Tour has missing distance, take from Map Data (FIFO or simplistic matching)
+            # If there's only one map and one tour, it's a direct match.
+            
+            for i, tour in enumerate(tour_entries):
+                # If distance is missing or 0
+                curr_dist = str(tour.get('distance_km', '0')).strip()
+                if curr_dist in ['0', '', 'None'] and map_entries:
+                    # Pop the first available map entry (assuming upload order matches tour order is risky but best effort)
+                    # Ideally, we just use the first map entry found if it's a single tour context.
+                    # Or reuse the map entry if it looks like a round trip for all.
+                    # For now: take the first map entry's distance.
+                    m_data = map_entries[0] 
+                    tour['distance_km'] = m_data.get('distance_km', '0')
+                    # Note: You might want to remove it from list if 1-to-1 mapping is desired
+                    # map_entries.pop(0) 
 
-                # Preview
-                st.success(f"Found {len(all_trips)} trip entries.")
-                df = pd.DataFrame(all_trips)
-                if not df.empty:
-                    st.dataframe(df[['departure_date', 'departure_place', 'arrival_place', 'distance_km', 'purpose']])
+            # 3. Sort by Date
+            try:
+                tour_entries.sort(key=lambda x: datetime.strptime(x['departure_date'], "%d/%m/%Y") if x.get('departure_date') else datetime.min)
+            except:
+                pass
 
-                # Generate DOCX
-                doc = generate_word_doc(all_trips, user_info)
+            if tour_entries:
+                doc = generate_word_doc(tour_entries, user_info)
                 
-                # Save to buffer
-                bio = io.BytesIO() if 'io' in locals() else None
-                import io
                 bio = io.BytesIO()
                 doc.save(bio)
                 
+                st.success("Diary Generated Successfully!")
                 st.download_button(
                     label="Download Tour Diary (.docx)",
                     data=bio.getvalue(),
-                    file_name="NAU_Tour_Diary.docx",
+                    file_name="NAU_Tour_Diary_Landscape.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 )
-                
             else:
-                st.warning("No tour data extracted. Please check the uploaded files.")
-
+                st.warning("No tour data found. Please upload a valid Tour Approval PDF.")
