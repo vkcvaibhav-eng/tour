@@ -1,6 +1,7 @@
 streamlit
-google-generativeai
-google-search-results
-fpdf
 pandas
-python-dotenv
+pdfplumber
+openpyxl
+python-docx
+geopy
+requests
