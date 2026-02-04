@@ -58,7 +58,7 @@ def extract_doc_data(uploaded_file, api_key):
     try:
         sample_file = genai.upload_file(path=tmp_path, display_name="NAU_Doc")
         
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-3-flash-preview')
         
         prompt = """
         Analyze this document. Identify if it is a 'Tour Approval', 'Salary Slip', or 'Map Screenshot'.
@@ -355,3 +355,4 @@ if uploaded_files and st.button("Generate Word Diary"):
                 )
             else:
                 st.warning("No tour data found. Please upload a valid Tour Approval PDF.")
+
