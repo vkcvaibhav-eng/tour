@@ -1,6 +1,0 @@
-streamlit
-google-generativeai
-google-search-results
-fpdf
-pandas
-python-dotenv
