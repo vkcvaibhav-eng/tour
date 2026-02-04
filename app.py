@@ -89,7 +89,7 @@ def extract_pdf_data(uploaded_file, api_key):
     try:
         sample_file = genai.upload_file(path=tmp_path, display_name="TourDoc")
         
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-3-flash-preview')
         
         prompt = """
         Analyze this document. It is either a 'Tour Approval' or a 'Salary Slip'.
@@ -238,5 +238,6 @@ if uploaded_files and st.button("Generate Diary"):
                         )
             else:
                 st.warning("No tour data found in uploaded files.")
+
 
 
