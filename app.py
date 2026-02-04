@@ -1,16 +1,17 @@
 import streamlit as st
 import google.generativeai as genai
 from docx import Document
-from docx.shared import Pt, Inches
+from docx.shared import Pt, Inches, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.section import WD_ORIENT
+from docx.enum.section import WD_ORIENT, WD_SECTION
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 import tempfile
 import os
 import json
-import io
+import pandas as pd
 from datetime import datetime
+import io
 
 # --- CONFIGURE PAGE ---
 st.set_page_config(page_title="NAU Tour Diary Generator", layout="wide")
@@ -57,7 +58,7 @@ def extract_doc_data(uploaded_file, api_key):
     try:
         sample_file = genai.upload_file(path=tmp_path, display_name="NAU_Doc")
         
-        model = genai.GenerativeModel('gemini-3-flash-preview')
+        model = genai.GenerativeModel('gemini-3-flash-preview') # Updated to stable model name if needed, or keep 'gemini-3-flash-preview'
         
         prompt = """
         Analyze this document. Identify if it is a 'Tour Approval', 'Salary Slip', or 'Map Screenshot'.
@@ -111,70 +112,63 @@ def generate_word_doc(tour_data, user_details):
     font.name = 'Times New Roman'
     font.size = Pt(11)
 
-    # --- TITLE ---
+    # --- HEADER ---
+    # Title
     p_title = doc.add_paragraph()
     p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run_title = p_title.add_run("TOUR DIARY")
     run_title.bold = True
     run_title.font.size = Pt(14)
     run_title.font.underline = True
-    p_title.paragraph_format.space_after = Pt(12)
-
-    # --- HEADER BLOCK (Specific Formatting) ---
-    # Layout:
-    # Left: Dept... | Center: Designation | Right: Name
-    # Left: Month   | Center: B.H.        | Right: Basic Pay
     
     # Determine Month Range
     dates = [t['departure_date'] for t in tour_data if t.get('departure_date')]
-    month_str = "Month: "
+    month_str = ""
     if dates:
         try:
             date_objs = [datetime.strptime(d, "%d/%m/%Y") for d in dates]
             min_date = min(date_objs)
             max_date = max(date_objs)
             if min_date.month == max_date.month and min_date.year == max_date.year:
-                month_str += f"{min_date.strftime('%B-%Y')}"
+                month_str = f"Month: {min_date.strftime('%B-%Y')}"
             else:
-                month_str += f"{min_date.strftime('%B-%Y')} to {max_date.strftime('%B-%Y')}"
+                month_str = f"Month: {min_date.strftime('%B-%Y')} to {max_date.strftime('%B-%Y')}"
         except:
             pass
 
+    # --- UPDATED HEADER LAYOUT (Table: 2 Rows, 3 Cols) ---
     header_table = doc.add_table(rows=2, cols=3)
     header_table.autofit = True
-    header_table.width = Inches(10) # Full landscape width
-
-    # Row 1
-    # Left: Dept
-    cell_dept = header_table.rows[0].cells[0]
-    cell_dept.text = "Dept. of Entomology, N. M. Collage of Agriculture, NAU, Navsari - 396 450"
-    cell_dept.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.LEFT
+    
+    # Row 1: Name (Left), Designation (Center), Department (Right)
+    r1 = header_table.rows[0].cells
+    
+    # Left: Name
+    r1[0].text = f"Name: {user_details.get('name', 'Vaibhav Kumar Kanubhai Chaudhari')}"
+    r1[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.LEFT
     
     # Center: Designation
-    cell_desig = header_table.rows[0].cells[1]
-    cell_desig.text = f"Designation: {user_details.get('designation', 'Associate Professor')}"
-    cell_desig.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r1[1].text = f"Designation: {user_details.get('designation', 'Associate Professor')}"
+    r1[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
     
-    # Right: Name
-    cell_name = header_table.rows[0].cells[2]
-    cell_name.text = f"Name: {user_details.get('name', 'Vaibhav Kumar Kanubhai Chaudhari')}"
-    cell_name.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    # Right: Dept
+    r1[2].text = "Dept. of Entomology, N.M.C.A., N.A.U., Navsari"
+    r1[2].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
 
-    # Row 2
-    # Left: Month
-    cell_month = header_table.rows[1].cells[0]
-    cell_month.text = month_str
-    cell_month.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.LEFT
+    # Row 2: Basic Pay (Left), B.H. (Center), Month (Right)
+    r2 = header_table.rows[1].cells
+    
+    # Left: Basic Pay
+    r2[0].text = f"Basic Salary: {user_details.get('basic_pay', 'N/A')}"
+    r2[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.LEFT
     
     # Center: B.H.
-    cell_bh = header_table.rows[1].cells[1]
-    cell_bh.text = f"B.H: {user_details.get('budget_head', '303/2092')}"
-    cell_bh.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r2[1].text = f"B.H: {user_details.get('budget_head', '303/2092')}"
+    r2[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
     
-    # Right: Basic Pay
-    cell_pay = header_table.rows[1].cells[2]
-    cell_pay.text = f"Basic salary: {user_details.get('basic_pay', 'N/A')}"
-    cell_pay.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    # Right: Month
+    r2[2].text = month_str
+    r2[2].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
 
     doc.add_paragraph().paragraph_format.space_after = Pt(12)
 
@@ -183,7 +177,7 @@ def generate_word_doc(tour_data, user_details):
     table = doc.add_table(rows=2, cols=9)
     table.style = 'Table Grid'
     
-    # Row 0: Merged Headers "Departure" and "Arrival"
+    # Header Rows
     row0 = table.rows[0].cells
     row0[0].merge(row0[2]) # Merge first 3 for Departure
     row0[0].text = "Departure"
@@ -193,7 +187,7 @@ def generate_word_doc(tour_data, user_details):
     row0[3].text = "Arrival"
     row0[3].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
     
-    # Row 1: Sub Headers
+    # Row 1 Subheaders
     hdr_cells = table.rows[1].cells
     sub_headers = ["Place", "Date", "Time", "Place", "Date", "Time", "Mode", "KM", "Purpose of Journey"]
     for i, txt in enumerate(sub_headers):
@@ -206,33 +200,25 @@ def generate_word_doc(tour_data, user_details):
     for trip in tour_data:
         row_cells = table.add_row().cells
         
-        # 1-3 Departure
         row_cells[0].text = str(trip.get('departure_place', 'NAU, Navsari'))
         row_cells[1].text = str(trip.get('departure_date', ''))
         row_cells[2].text = str(trip.get('departure_time', ''))
-        
-        # 4-6 Arrival
         row_cells[3].text = str(trip.get('arrival_place', ''))
         row_cells[4].text = str(trip.get('arrival_date', ''))
         row_cells[5].text = str(trip.get('arrival_time', ''))
-        
-        # 7 Mode
         row_cells[6].text = str(trip.get('mode_of_journey', 'Private Vehicle'))
-        
-        # 8 KM
         row_cells[7].text = str(trip.get('distance_km', ''))
         
-        # 9 Purpose (Specific Format)
+        # --- UPDATED PURPOSE TEXT ---
         sys_no = trip.get('system_no', '')
-        purpose_subject = trip.get('purpose', '')
-        
+        purpose_desc = trip.get('purpose', '')
         purpose_text = (
-            f"Subject of Tour: {purpose_subject}\n"
+            f"Subject of Tour: {purpose_desc}\n"
             f"This tour was approved by the Principal, NMCA, NAU, Navsari in Online Tour management System No. {sys_no}"
         )
         row_cells[8].text = purpose_text
         
-        # Formatting
+        # Formatting cells
         for cell in row_cells:
             for p in cell.paragraphs:
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER if cell != row_cells[8] else WD_ALIGN_PARAGRAPH.LEFT
@@ -241,38 +227,48 @@ def generate_word_doc(tour_data, user_details):
 
     doc.add_paragraph().paragraph_format.space_after = Pt(24)
 
-    # --- SIGNATURE BLOCK (Specific Ordering) ---
-    # Order requested: Left=Approved, Center=Recommended, Right=User
-    
+    # --- UPDATED SIGNATURE BLOCK (Table: 1 Row, 3 Cols) ---
+    # Left: User | Center: Recommended | Right: Approved
     sig_table = doc.add_table(rows=1, cols=3)
     sig_table.autofit = True
-    sig_table.width = Inches(10)
     
-    # 1. Left: Approved
-    cell_app = sig_table.rows[0].cells[0]
-    p_app = cell_app.add_paragraph()
-    p_app.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    run_a = p_app.add_run("Approved\n\n\nPrincipal and Dean\nN. M. College of Agriculture\nNAU, Navsari")
-    run_a.bold = True
-
-    # 2. Center: Recommended
-    cell_rec = sig_table.rows[0].cells[1]
-    p_rec = cell_rec.add_paragraph()
+    # COL 1: User (Left Aligned)
+    cell_user = sig_table.cell(0, 0)
+    p_user = cell_user.paragraphs[0]
+    p_user.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    run_u = p_user.add_run(
+        "(V. K. Chaudhari)\n"
+        "Assistant Professor\n"
+        "Dept. of Entomology\n"
+        "N.M. College of Agriculture\n"
+        "NAU, Navsari"
+    )
+    run_u.bold = True
+    
+    # COL 2: Recommended (Center Aligned)
+    cell_rec = sig_table.cell(0, 1)
+    p_rec = cell_rec.paragraphs[0]
     p_rec.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run_r = p_rec.add_run("Recommended\n\n\nProfessor and Head\nDept. of Entomology\nN. M. College of Agriculture\nNAU, Navsari")
+    run_r = p_rec.add_run(
+        "Recommended\n\n\n"
+        "Professor and Head\n"
+        "Dept. of Entomology\n"
+        "N. M. College of Agriculture\n"
+        "NAU, Navsari"
+    )
     run_r.bold = True
 
-    # 3. Right: User
-    cell_user = sig_table.rows[0].cells[2]
-    p_user = cell_user.add_paragraph()
-    p_user.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    
-    # User Text Format: (Name) \n Designation \n Dept...
-    user_name = user_details.get('name', 'Vaibhav Kumar Kanubhai Chaudhari')
-    user_desig = user_details.get('designation', 'Associate Professor')
-    
-    run_u = p_user.add_run(f"({user_name})\n{user_desig}\nDept. of Entomology\nN.M. College of Agriculture\nNAU, Navsari")
-    run_u.bold = True
+    # COL 3: Approved (Right Aligned)
+    cell_app = sig_table.cell(0, 2)
+    p_app = cell_app.paragraphs[0]
+    p_app.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    run_a = p_app.add_run(
+        "Approved\n\n\n"
+        "Principal and Dean\n"
+        "N. M. College of Agriculture\n"
+        "NAU, Navsari"
+    )
+    run_a.bold = True
 
     return doc
 
@@ -313,7 +309,7 @@ if uploaded_files and st.button("Generate Word Diary"):
                             for t in trips:
                                 t['system_no'] = data.get('system_no', 'Unknown')
                                 tour_entries.append(t)
-                        elif isinstance(trips, dict): 
+                        elif isinstance(trips, dict):
                              trips['system_no'] = data.get('system_no', 'Unknown')
                              tour_entries.append(trips)
                              
@@ -348,4 +344,3 @@ if uploaded_files and st.button("Generate Word Diary"):
                 )
             else:
                 st.warning("No tour data found. Please upload a valid Tour Approval PDF.")
-
