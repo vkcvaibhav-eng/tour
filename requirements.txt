@@ -1,6 +1,5 @@
 streamlit
 google-generativeai
-google-search-results
-fpdf
+python-docx
 pandas
 python-dotenv
