@@ -238,7 +238,7 @@ def generate_word_doc(tour_data, user_details):
     p_user.alignment = WD_ALIGN_PARAGRAPH.LEFT
     run_u = p_user.add_run(
         "(V. K. Chaudhari)\n"
-        "Assistant Professor\n"
+        "Senior Acarologist\n"
         "Dept. of Entomology\n"
         "N.M. College of Agriculture\n"
         "NAU, Navsari"
@@ -344,3 +344,4 @@ if uploaded_files and st.button("Generate Word Diary"):
                 )
             else:
                 st.warning("No tour data found. Please upload a valid Tour Approval PDF.")
+
