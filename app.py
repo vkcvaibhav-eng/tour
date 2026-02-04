@@ -1,168 +1,293 @@
 import streamlit as st
-import pandas as pd
-import re
-from pypdf import PdfReader
-from io import BytesIO
-from datetime import datetime
-from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+import google.generativeai as genai
+from serpapi import GoogleSearch
+from fpdf import FPDF
+import PyPDF2
+import json
+import io
+import datetime
 
-# --- CONFIGURATION & RULES (Gujarat Finance Dept Nov 2024) ---
-CITY_CLASS = {
-    'Ahmedabad': 'X', 'Surat': 'X', 'Vadodara': 'Y', 'Rajkot': 'Y', 'Bhavnagar': 'Y', 'Jamnagar': 'Y',
-    'Gandhinagar': 'Y', 'Junagadh': 'Z', 'Navsari': 'Z', 'Vyara': 'Z', 'Udaipur': 'Z', 'Jaipur': 'Y', 'Ludhiana': 'Y'
-}
+# --- CONFIGURATION & SETUP ---
+st.set_page_config(page_title="Auto-Tour Diary Generator", layout="wide")
 
-DA_RATES = {
-    "Level 12+": {"X": 1000, "Y": 800, "Z": 500},
-    "Level 6-11": {"X": 800, "Y": 500, "Z": 400},
-    "Level 1-5": {"X": 500, "Y": 400, "Z": 300}
-}
+st.title("📄 Automated Tour Diary Generator")
+st.markdown("""
+This tool extracts tour details using **Gemini 1.5 Pro**, calculates distances based on **Govt Rules (Rail vs. Road/GSRTC)** via SerpApi, 
+and generates a final **Tour Diary PDF** for submission.
+""")
 
-# --- PDF EXTRACTION LOGIC ---
-def extract_salary_data(pdf_file):
-    reader = PdfReader(pdf_file)
-    text = "".join([page.extract_text() for page in reader.pages])
-    
-    data = {}
-    data['name'] = re.search(r"EMP NAME:\s*(.*)", text).group(1).strip() if re.search(r"EMP NAME:\s*(.*)", text) else "N/A"
-    data['designation'] = re.search(r"DESIGNATION\s*(.*)", text).group(1).strip() if re.search(r"DESIGNATION\s*(.*)", text) else "N/A"
-    data['basic'] = float(re.search(r"Basic\s*([\d,]+\.\d+)", text).group(1).replace(',', '')) if re.search(r"Basic\s*([\d,]+\.\d+)", text) else 0.0
-    data['bh'] = re.search(r"BH NO:\s*\((.*?)\)", text).group(1).strip() if re.search(r"BH NO:\s*\((.*?)\)", text) else "303/2092"
-    
-    # Determine Level based on Basic Pay (Simplified logic for NAU)
-    if data['basic'] >= 78800: data['level'] = "Level 12+"
-    elif data['basic'] >= 35400: data['level'] = "Level 6-11"
-    else: data['level'] = "Level 1-5"
-    
-    return data
-
-def extract_tour_data(pdf_file):
-    reader = PdfReader(pdf_file)
-    text = "".join([page.extract_text() for page in reader.pages])
-    
-    tour = {}
-    tour['otms_no'] = re.search(r"(\d{14})", text).group(1) if re.search(r"(\d{14})", text) else "N/A"
-    tour['purpose'] = re.search(r"Purpose of Journey:\s*(.*?)\n", text, re.S).group(1).strip() if re.search(r"Purpose of Journey:", text) else "Official Work"
-    
-    # Extracting Departure/Arrival (Simplified pattern for OTMS)
-    tour['from_city'] = "Navsari"
-    to_city_match = re.search(r"To\s+(.*?)\s+Private", text)
-    tour['to_city'] = to_city_match.group(1).strip() if to_city_match else "Vyara"
-    
-    date_match = re.search(r"Departure:\s*(\d{4}-\d{2}-\d{2})", text)
-    tour['date'] = date_match.group(1) if date_match else datetime.now().strftime("%Y-%m-%d")
-    
-    return tour
-
-# --- EXCEL GENERATION (NAU FORMAT) ---
-def create_nau_excel(emp_data, tours):
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "TA Bill"
-    
-    # Styling
-    bold_font = Font(bold=True, size=11)
-    center_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
-
-    # Header
-    ws.merge_cells('A1:L1')
-    ws['A1'] = "GJ;FZL S'lQF lJ`JlJWF,I (NAVSARI AGRICULTURAL UNIVERSITY)"
-    ws['A1'].font = Font(bold=True, size=14)
-    ws['A1'].alignment = center_align
-
-    # Employee Info
-    ws['A3'] = f"Name: {emp_data['name']}"
-    ws['F3'] = f"Designation: {emp_data['designation']}"
-    ws['A4'] = f"Basic Pay: {emp_data['basic']}"
-    ws['F4'] = f"Pay Level: {emp_data['level']}"
-    ws['A5'] = f"Budget Head: {emp_data['bh']}"
-
-    # Table Headers
-    headers = ["Date", "Departure", "Arrival", "Mode", "Fare", "DA Rate", "DA %", "DA Amt", "Total", "Purpose"]
-    for col, text in enumerate(headers, 1):
-        cell = ws.cell(row=8, column=col, value=text)
-        cell.font = bold_font
-        cell.border = border
-        cell.alignment = center_align
-
-    # Data Rows
-    row_num = 9
-    grand_total = 0
-    for t in tours:
-        city_cls = CITY_CLASS.get(t['to_city'], 'Z')
-        da_rate = DA_RATES[emp_data['level']][city_cls]
-        
-        # Logic: No private vehicle reimbursement (Rule enforced)
-        fare = 0.0 # Strict compliance
-        
-        ws.cell(row=row_num, column=1, value=t['date']).border = border
-        ws.cell(row=row_num, column=2, value="Navsari").border = border
-        ws.cell(row=row_num, column=3, value=t['to_city']).border = border
-        ws.cell(row=row_num, column=4, value="Rail/Bus (Lowest)").border = border
-        ws.cell(row=row_num, column=5, value=fare).border = border
-        ws.cell(row=row_num, column=6, value=da_rate).border = border
-        ws.cell(row=row_num, column=7, value="100%").border = border
-        ws.cell(row=row_num, column=8, value=da_rate).border = border
-        total = fare + da_rate
-        ws.cell(row=row_num, column=9, value=total).border = border
-        ws.cell(row=row_num, column=10, value=t['purpose']).border = border
-        
-        grand_total += total
-        row_num += 1
-
-    # Footer
-    ws.cell(row=row_num+1, column=8, value="Grand Total:").font = bold_font
-    ws.cell(row=row_num+1, column=9, value=grand_total).font = bold_font
-
-    # Certifications
-    ws.cell(row=row_num+3, column=1, value="Certified that the shortest route was taken and no private vehicle fare is claimed.")
-    
-    output = BytesIO()
-    wb.save(output)
-    return output.getvalue()
-
-# --- STREAMLIT UI ---
-st.set_page_config(page_title="NAU TA/DA Automation", layout="wide")
-
-st.title("🏛️ NAU TA/DA Reimbursement System")
-st.info("Upload your Approved OTMS Tour PDFs and Salary Slip to generate the official NAU TA Bill.")
-
+# --- SIDEBAR: API KEYS ---
 with st.sidebar:
-    st.header("1. Upload Documents")
-    salary_pdf = st.file_uploader("Upload Salary Slip (PDF)", type="pdf")
-    tour_pdfs = st.file_uploader("Upload Approved OTMS Tours (Multiple PDFs)", type="pdf", accept_multiple_files=True)
+    st.header("🔑 API Configuration")
+    GEMINI_API_KEY = st.text_input("Enter Gemini API Key", type="password")
+    SERPAPI_KEY = st.text_input("Enter SerpApi Key", type="password")
+    
+    st.info("Files needed: Upload your 'Online Tour Management' PDFs and your 'Salary Slip'.")
 
-if salary_pdf and tour_pdfs:
+# --- HELPER FUNCTIONS ---
+
+def extract_text_from_pdf(uploaded_file):
+    """Extracts raw text from a PDF file."""
     try:
-        with st.spinner("Processing Documents..."):
-            emp_info = extract_salary_data(salary_pdf)
-            all_tours = [extract_tour_data(tp) for tp in tour_pdfs]
-            
-            st.subheader("📋 Verification Preview")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.write("**Employee Details:**")
-                st.json(emp_info)
-            with col2:
-                st.write(f"**Tours Detected:** {len(all_tours)}")
-                st.dataframe(pd.DataFrame(all_tours))
+        pdf_reader = PyPDF2.PdfReader(uploaded_file)
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text()
+        return text
+    except Exception as e:
+        st.error(f"Error reading PDF: {e}")
+        return None
 
-            # Generate Excel
-            excel_data = create_nau_excel(emp_info, all_tours)
+def get_distance_logic(origin, destination, api_key):
+    """
+    Calculates distance based on User Rule:
+    1. Check Direct Railway Connection.
+    2. If Direct Rail exists -> Return Rail Distance.
+    3. Else -> Return Road Distance (GSRTC proxy).
+    """
+    if not api_key:
+        return "N/A (No Key)", "Manual"
+
+    # 1. Try Finding a Train Route
+    params_train = {
+        "engine": "google_maps_directions",
+        "start_addr": origin,
+        "end_addr": destination,
+        "travel_mode": "transit",
+        "transit_mode": "train",
+        "api_key": api_key
+    }
+    
+    try:
+        search = GoogleSearch(params_train)
+        results = search.get_dict()
+        
+        # Check if a valid train route exists
+        if "directions" in results and results["directions"]:
+            route = results["directions"][0]
             
-            st.success("Reimbursement File Ready!")
-            st.download_button(
-                label="📥 Download Official NAU TA Bill (Excel)",
-                data=excel_data,
-                file_name=f"TA_Bill_{emp_info['name'].replace(' ', '_')}_{datetime.now().strftime('%b_%Y')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            # Check for direct connection (1 step usually means direct or minimal changes)
+            # We look at the 'steps' to ensure it's a train
+            is_direct_train = False
+            train_distance_km = 0
+            
+            for leg in route.get("legs", []):
+                train_distance_km = leg["distance"]["value"] / 1000 # Convert meters to km
+                for step in leg.get("steps", []):
+                    if step.get("travel_mode") == "TRANSIT" and step.get("transit_details", {}).get("vehicle", {}).get("type") == "TRAIN":
+                        is_direct_train = True
+            
+            if is_direct_train:
+                return f"{train_distance_km:.2f}", "Rail (Direct)"
+
+    except Exception as e:
+        print(f"Rail search failed: {e}")
+
+    # 2. Fallback to Road (GSRTC/Driving) if no direct train
+    params_road = {
+        "engine": "google_maps_directions",
+        "start_addr": origin,
+        "end_addr": destination,
+        "travel_mode": "driving", # Standard for road distance calculation
+        "api_key": api_key
+    }
+    
+    try:
+        search = GoogleSearch(params_road)
+        results = search.get_dict()
+        
+        if "directions" in results and results["directions"]:
+            route = results["directions"][0]
+            dist_meters = route["legs"][0]["distance"]["value"]
+            dist_km = dist_meters / 1000
+            return f"{dist_km:.2f}", "Road (GSRTC Logic)"
             
     except Exception as e:
-        st.error(f"Error processing files: {e}")
-        st.warning("Ensure the PDFs are text-readable and not scanned images.")
+        return "Error", "Manual Check"
+        
+    return "0", "Unknown"
 
-else:
-    st.warning("Please upload both Salary Slip and at least one Tour PDF to proceed.")
+def analyze_with_gemini(text_content, doc_type):
+    """Uses Gemini 1.5 Pro to extract specific JSON data."""
+    if not GEMINI_API_KEY:
+        return None
+
+    genai.configure(api_key=GEMINI_API_KEY)
+    
+    # Define schemas based on document type
+    if doc_type == "tour":
+        prompt = f"""
+        Extract the following details from this Tour Report text and return ONLY a valid JSON object.
+        Do not include markdown formatting like ```json.
+        
+        Fields required:
+        - tour_date (DD/MM/YYYY)
+        - origin_city (City name only, e.g., Navsari)
+        - destination_city (City name only, e.g., Vyara)
+        - departure_time (HH:MM format, if found, else "00:00")
+        - arrival_time (HH:MM format, if found, else "00:00")
+        - purpose (Short summary of the purpose)
+        
+        Text content:
+        {text_content[:4000]}
+        """
+    elif doc_type == "salary":
+        prompt = f"""
+        Extract the following details from this Salary Slip text and return ONLY a valid JSON object.
+        Do not include markdown formatting like ```json.
+        
+        Fields required:
+        - employee_name
+        - designation
+        - basic_salary
+        - headquarters (City name, usually inferred from office address)
+        
+        Text content:
+        {text_content[:4000]}
+        """
+
+    model = genai.GenerativeModel('gemini-1.5-pro')
+    response = model.generate_content(prompt)
+    
+    try:
+        # Clean response to ensure pure JSON
+        cleaned_response = response.text.strip().replace('```json', '').replace('```', '')
+        return json.loads(cleaned_response)
+    except:
+        st.error("Failed to parse Gemini response.")
+        return None
+
+class PDF(FPDF):
+    def header(self):
+        self.set_font('Arial', 'B', 12)
+        self.cell(0, 10, 'TOUR DIARY / T.A. BILL DETAILS', 0, 1, 'C')
+        self.ln(5)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+
+# --- MAIN APP LOGIC ---
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("1. Upload Salary Slip (For Personal Details)")
+    salary_file = st.file_uploader("Upload Salary PDF", type=['pdf'], key="salary")
+
+with col2:
+    st.subheader("2. Upload Tour Approvals")
+    tour_files = st.file_uploader("Upload Generated Tour PDFs", type=['pdf'], accept_multiple_files=True, key="tours")
+
+if st.button("🚀 Process Files & Calculate Distances"):
+    if not GEMINI_API_KEY or not SERPAPI_KEY:
+        st.error("Please enter both API Keys in the sidebar.")
+    elif not salary_file or not tour_files:
+        st.error("Please upload both salary slip and tour documents.")
+    else:
+        # 1. Process Salary Slip
+        st.info("Analyzing Salary Slip...")
+        salary_text = extract_text_from_pdf(salary_file)
+        salary_data = analyze_with_gemini(salary_text, "salary")
+        
+        if salary_data:
+            st.success(f"Identified: {salary_data.get('employee_name')} ({salary_data.get('designation')})")
+        
+        # 2. Process Tour Files
+        st.info(f"Analyzing {len(tour_files)} Tour Documents & Calculating Distances...")
+        
+        processed_tours = []
+        
+        progress_bar = st.progress(0)
+        
+        for idx, tour_file in enumerate(tour_files):
+            # Extract Text
+            tour_text = extract_text_from_pdf(tour_file)
+            
+            # Extract Data via Gemini
+            tour_data = analyze_with_gemini(tour_text, "tour")
+            
+            if tour_data:
+                # Calculate Distance via SerpApi
+                origin = tour_data.get('origin_city', 'Navsari')
+                dest = tour_data.get('destination_city', '')
+                
+                dist_km, mode = get_distance_logic(origin, dest, SERPAPI_KEY)
+                
+                tour_data['distance_km'] = dist_km
+                tour_data['calc_mode'] = mode
+                processed_tours.append(tour_data)
+            
+            progress_bar.progress((idx + 1) / len(tour_files))
+
+        # Store in session state for PDF generation
+        st.session_state['salary_data'] = salary_data
+        st.session_state['processed_tours'] = processed_tours
+        st.success("Processing Complete!")
+
+# --- DISPLAY RESULTS & GENERATE PDF ---
+
+if 'processed_tours' in st.session_state and st.session_state['processed_tours']:
+    st.write("---")
+    st.subheader("3. Verified Data")
+    
+    # Display table of calculated data
+    st.table(st.session_state['processed_tours'])
+    
+    if st.button("📥 Generate Final Tour Diary PDF"):
+        salary = st.session_state.get('salary_data', {})
+        tours = st.session_state.get('processed_tours', [])
+        
+        pdf = PDF(orientation='L', unit='mm', format='A4') # Landscape for better table fit
+        pdf.add_page()
+        pdf.set_font("Arial", size=10)
+        
+        # Employee Header Info
+        pdf.set_font("Arial", 'B', 10)
+        pdf.cell(0, 7, f"Name: {salary.get('employee_name', 'Unknown')}", ln=True)
+        pdf.cell(0, 7, f"Designation: {salary.get('designation', 'Unknown')}", ln=True)
+        pdf.cell(0, 7, f"Basic Salary: {salary.get('basic_salary', 'Unknown')}", ln=True)
+        pdf.cell(0, 7, f"Headquarters: {salary.get('headquarters', 'Navsari')}", ln=True)
+        pdf.ln(5)
+        
+        # Table Header
+        pdf.set_fill_color(200, 220, 255)
+        pdf.cell(30, 10, "Date", 1, 0, 'C', 1)
+        pdf.cell(40, 10, "Origin", 1, 0, 'C', 1)
+        pdf.cell(40, 10, "Destination", 1, 0, 'C', 1)
+        pdf.cell(20, 10, "Mode", 1, 0, 'C', 1)
+        pdf.cell(20, 10, "KM", 1, 0, 'C', 1)
+        pdf.cell(120, 10, "Purpose", 1, 1, 'C', 1)
+        
+        # Table Rows
+        pdf.set_font("Arial", size=9)
+        total_km = 0.0
+        
+        for tour in tours:
+            try:
+                km_val = float(tour.get('distance_km', 0))
+                total_km += km_val
+            except:
+                pass
+                
+            pdf.cell(30, 10, str(tour.get('tour_date')), 1)
+            pdf.cell(40, 10, str(tour.get('origin_city')), 1)
+            pdf.cell(40, 10, str(tour.get('destination_city')), 1)
+            pdf.cell(20, 10, "Pvt/Road" if "Road" in tour.get('calc_mode') else "Rail", 1)
+            pdf.cell(20, 10, str(tour.get('distance_km')), 1)
+            pdf.cell(120, 10, str(tour.get('purpose')), 1, 1) # 1,1 means line break after
+            
+        pdf.ln(5)
+        pdf.set_font("Arial", 'B', 10)
+        pdf.cell(0, 10, f"Total Kilometers: {total_km:.2f} KM", ln=True)
+        
+        # Output
+        pdf_bytes = pdf.output(dest='S').encode('latin-1')
+        
+        st.download_button(
+            label="Download PDF Report",
+            data=pdf_bytes,
+            file_name="generated_tour_diary.pdf",
+            mime="application/pdf"
+        )
