@@ -2,5 +2,5 @@ streamlit
 google-generativeai
 google-search-results
 fpdf
-pypdf
+pandas
 python-dotenv
