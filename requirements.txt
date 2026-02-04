@@ -1,0 +1,5 @@
+streamlit
+requests
+google-search-results
+openai
+pandas
