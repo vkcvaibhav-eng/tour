@@ -227,6 +227,18 @@ def generate_word_doc(tour_data, user_details):
 
     doc.add_paragraph().paragraph_format.space_after = Pt(24)
 
+    # --- CERTIFICATE SECTION (ADDED AS REQUESTED) ---
+    p_cert_title = doc.add_paragraph()
+    p_cert_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run_cert = p_cert_title.add_run("Certificate")
+    run_cert.bold = True
+    run_cert.font.size = Pt(11) # Matching doc font size
+
+    p_cert_text = doc.add_paragraph("This is to certify that above said TA bill is preapred based on actual journey and actual destination with shortest routes")
+    p_cert_text.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    doc.add_paragraph().paragraph_format.space_after = Pt(12)
+
     # --- UPDATED SIGNATURE BLOCK (Table: 1 Row, 3 Cols) ---
     # Left: User | Center: Recommended | Right: Approved
     sig_table = doc.add_table(rows=1, cols=3)
@@ -344,4 +356,3 @@ if uploaded_files and st.button("Generate Word Diary"):
                 )
             else:
                 st.warning("No tour data found. Please upload a valid Tour Approval PDF.")
-
